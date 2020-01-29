@@ -38,6 +38,7 @@ setup(
         'tensorflow': ['tensorflow>=1.14'],
         'tensorflow_gpu': ['tensorflow-gpu>=1.14'],
         'tests': ['pytest', 'dm-sonnet'],
+        'horovod': ['horovod>=0.16'],
     },
     classifiers=[
         'Development Status :: 4 - Beta',
