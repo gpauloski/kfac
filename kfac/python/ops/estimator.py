@@ -29,6 +29,7 @@ from tensorflow.python.util import nest
 from kfac.python.ops import placement
 from kfac.python.ops import utils
 
+import horovod.tensorflow as hvd
 
 # The linter is confused.
 # pylint: disable=abstract-class-instantiated
@@ -58,6 +59,8 @@ def make_fisher_estimator(placement_strategy=None, **kwargs):
     return FisherEstimatorRoundRobin(**kwargs)
   elif placement_strategy == "replica_round_robin":
     return FisherEstimatorReplicaRoundRobin(**kwargs)
+  elif placement_strategy == "hvd_round_robin":
+    return FisherEstimatorHorovodRoundRobin(**kwargs)
   else:
     raise ValueError(
         "Unimplemented vars and ops placement strategy : {}".format(
@@ -264,13 +267,66 @@ class FisherEstimator(object):
     def make_thunk(fb, params):
       return lambda: transform(fb, vecs[params])
 
-    thunks = tuple(make_thunk(fb, params)
-                   for params, fb in self.layers.fisher_blocks.items())
+    def stack_ragged(tensors):
+      values = tf.concat(tensors, axis=0)
+      lens = tf.stack([tf.shape(t, out_type=tf.int64)[0] for t in tensors])
+      return tf.RaggedTensor.from_row_lengths(values, lens)
 
-    params_list = tuple(params
-                        for params, _ in self.layers.fisher_blocks.items())
+    n = hvd.size()
+    layer_count = len(vecs_and_vars)
 
-    results = self._place_and_compute_transformation_thunks(thunks, params_list)
+    # handle case where fewer layers than workers so some workers
+    # just won't get work
+    if layer_count < n:
+      n = layers_count
+
+    layer_partitions = np.array_split(range(layer_count), n)
+
+    flattened_results = []
+    results_shape = []
+    results_count = []
+
+    for i, partition in enumerate(layer_partitions):
+      if hvd.rank() == i:
+        # just get fisher blocks for layer assigned to this worker
+        fb_items = list(self.layers.fisher_blocks.items())[min(partition):max(partition)+1]
+
+        thunks = tuple(make_thunk(fb, params)
+                       for params, fb in fb_items)
+
+        params_list = tuple(params
+                            for params, _ in fb_items)
+
+        results = self._place_and_compute_transformation_thunks(thunks, params_list)
+
+        # flatten and unflatten
+        for result in results:
+            results_count.append(len(result))
+            results_shape.extend([tf.shape(x) for x in result])
+            flattened_results.extend([tf.reshape(x, [-1]) for x in result])
+
+
+    print("Rank {}: flat_results_len={}, results_count={}".format(hvd.rank(), len(flattened_results), results_count))
+    
+    flattened_results = stack_ragged(flattened_results)
+    flattened_results.name = "flattened_results"  # b/c horovod expects the tensor to have a
+                                                  # name and ragged tensors don't
+
+
+    # convert list to ragged_tensor
+    results = hvd.allgather(results)
+    results = tf.unstack(results)
+
+    unpacked_results = []
+    current = 0
+    for c in result_count:
+      res = []
+      for i in range(current, current + c): 
+        res.append(tf.reshape(flattened_results[i], results_shape[i]))
+      unpacked_results.append(res)
+      current += c  
+    
+    results = unpacked_results   
 
     trans_vecs = utils.SequenceDict()
     for params, result in zip(self.layers.fisher_blocks, results):
@@ -731,4 +787,10 @@ class FisherEstimatorReplicaRoundRobin(
     placement.ReplicaRoundRobinPlacementMixin,
     FisherEstimator):
   """FisherEstimator which provides round robin replica placement strategy."""
+  pass
+
+class FisherEstimatorHorovodRoundRobin(
+    placement.HorovodRoundRobinPlacementMixin,
+    FisherEstimator):
+  """FisherEstimator with Horovod round robin placement strategy."""
   pass

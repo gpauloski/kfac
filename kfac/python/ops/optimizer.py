@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import re
 import tensorflow as tf
+import horovod.tensorflow as hvd
 
 from kfac.python.ops import curvature_matrix_vector_products as cmvp
 from kfac.python.ops import estimator as est
@@ -82,6 +83,11 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
                print_logs=False,
                tf_replicator=None,
                dtype="float32",
+               hvd_name=None,
+               hvd_device_dense="",
+               hvd_device_sparse="",
+               hvd_compression=hvd.Compression.none,
+               hvd_sparse_as_dense=False,
                **kwargs):
     """Initializes the K-FAC optimizer with the given settings.
 
@@ -262,6 +268,18 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
           (Default: None)
       dtype: TF dtype or string representing one. dtype used for scalar
           properties (rho, etc). (Default: "float32")
+      hvd_name: Optional name prefix for the operations created when applying
+          gradients. Defaults to "Distributed" followed by the provided
+          optimizer type.
+      hvd_device_dense: Device to be used for dense tensors. Uses GPU by default
+          if Horovod was build with HOROVOD_GPU_ALLREDUCE.
+      hvd_device_sparse: Device to be used for sparse tensors. Uses GPU by default
+          if Horovod was build with HOROVOD_GPU_ALLGATHER.
+      hvd_compression: Compression algorithm used to reduce the amount of data
+          sent and received by each worker node. Defaults to not using compression.
+      hvd_sparse_as_dense: Treat all sparse gradients as dense tensors.  This can
+          help improve performance and memory utilization if
+          the original sparse gradient has high density. Defaults to false.
       **kwargs: Arguments to be passed to specific placement strategy mixin.
           Check `placement.RoundRobinPlacementMixin` for example.
 
@@ -385,6 +403,15 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
         # We need to sanitize the names of the variables that K-FAC creates
         # so they are the same between replicas.
         ff.set_global_constants(get_sanitized_name_fn=_get_sanitized_name)
+
+      # Save Horovod vars
+      if hvd_name is None:
+          hvd_name = "DistributedKFAC"
+      self.hvd_name = hvd_name
+      self.hvd_device_dense = hvd_device_dense
+      self.hvd_device_sparse = hvd_device_sparse
+      self.hvd_compression = hvd_compression
+      self.hvd_sparse_as_dense = hvd_sparse_as_dense
 
       self._fisher_est = est.make_fisher_estimator(
           placement_strategy=placement_strategy,
@@ -734,6 +761,27 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
         num_replicas = tf.distribute.get_strategy().num_replicas_in_sync
         raw_updates_and_vars = [(update/num_replicas, var)
                                 for update, var in raw_updates_and_vars]
+
+      # All reduce grads_and_vars with horovod before applying them
+      if hvd.size() > 1:
+        averaged_grads_and_vars = []
+        with tf.name_scope(self.hvd_name + "_Allreduce"):
+          for grad, var in raw_updates_and_vars:
+            if grad is not None:
+              if self.hvd_sparse_as_dense and \
+                  isinstance(grad, tf.IndexedSlices):
+                grad = tf.convert_to_tensor(grad)
+              avg_grad = hvd.allreduce(grad,
+                                       device_dense=self.hvd_device_dense,
+                                       device_sparse=self.hvd_device_sparse,
+                                       compression=self.hvd_compression)
+              averaged_grads_and_vars.append((avg_grad, var))
+            else:
+              averaged_grads_and_vars.append((None, var))
+
+        assert len(grads_and_vars) == len(averaged_grads_and_vars)
+
+        raw_updates_and_vars = averaged_grads_and_vars
 
       # Update trainable variables with this step, applying self._learning_rate.
       apply_op = super(KfacOptimizer, self).apply_gradients(
