@@ -267,13 +267,8 @@ class FisherEstimator(object):
     def make_thunk(fb, params):
       return lambda: transform(fb, vecs[params])
 
-    def stack_ragged(tensors):
-      values = tf.concat(tensors, axis=0)
-      lens = tf.stack([tf.shape(t, out_type=tf.int64)[0] for t in tensors])
-      return tf.RaggedTensor.from_row_lengths(values, lens)
-
     n = hvd.size()
-    layer_count = len(vecs_and_vars)
+    layer_count = len(self.layers.fisher_blocks.items())
 
     # handle case where fewer layers than workers so some workers
     # just won't get work
@@ -282,57 +277,69 @@ class FisherEstimator(object):
 
     layer_partitions = np.array_split(range(layer_count), n)
 
-    flattened_results = []
-    results_shape = []
-    results_count = []
+    results = []
 
     for i, partition in enumerate(layer_partitions):
+      fb_items = list(self.layers.fisher_blocks.items())[min(partition):max(partition)+1]
+      #print(i, partition, len(fb_items), len(self.layers.fisher_blocks.items()))
       if hvd.rank() == i:
-        # just get fisher blocks for layer assigned to this worker
-        fb_items = list(self.layers.fisher_blocks.items())[min(partition):max(partition)+1]
+        thunks = tuple(make_thunk(fb, params) for params, fb in fb_items)
+        params_list = tuple(params for params, _ in fb_items)
+        results.extend(self._place_and_compute_transformation_thunks(
+                       thunks, params_list))
+      else:
+        for params, _ in fb_items:
+          results.append(tuple([tf.zeros_like(x) for x in params]))
 
-        thunks = tuple(make_thunk(fb, params)
-                       for params, fb in fb_items)
+    # Get shapes
+    shapes = []
+    reduced_results = []
+    for i, res in enumerate(results):
+      shapes.append(tuple([x.shape.as_list() for x in res]))
+      for x in res:
+          reduced_results.append(hvd.allreduce(x, average=False))
+      #print("rank", hvd.rank(), ":", i, res)
 
-        params_list = tuple(params
-                            for params, _ in fb_items)
+    print(len(reduced_results))
+    #results = [(reduced_results[i], reduced_results[i+1]) for i in range(0, len(reduced_results),2)]
 
-        results = self._place_and_compute_transformation_thunks(thunks, params_list)
+    print(len(reduced_results))
 
-        # flatten and unflatten
-        for result in results:
-            results_count.append(len(result))
-            results_shape.extend([tf.shape(x) for x in result])
-            flattened_results.extend([tf.reshape(x, [-1]) for x in result])
+    #print(layer_count, len(shapes), shapes)
+    #x1 = []
+    #x2 = []
+    #for i, res, in enumerate(results):
+      #results[i] = tuple([hvd.allreduce(x, average=False) for x in res])
+    #  root = [1 if i in x else 0 for x in layer_partitions]
+      #root_rank = root.index(1)
+      #print(root, root_rank, i, [x for x in res])
+    #  x1.append(hvd.allreduce(res[0], average=False))
+    #  x2.append(hvd.allreduce(res[1], average=False))
+      #results[i] = tuple([hvd.broadcast(x, root_rank) for x in res])
+    #results = list(zip(x1, x2))
+    #print(results)
 
-
-    print("Rank {}: flat_results_len={}, results_count={}".format(hvd.rank(), len(flattened_results), results_count))
-    
-    flattened_results = stack_ragged(flattened_results)
-    flattened_results.name = "flattened_results"  # b/c horovod expects the tensor to have a
-                                                  # name and ragged tensors don't
-
-
-    # convert list to ragged_tensor
-    results = hvd.allgather(results)
-    results = tf.unstack(results)
-
-    unpacked_results = []
-    current = 0
-    for c in result_count:
-      res = []
-      for i in range(current, current + c): 
-        res.append(tf.reshape(flattened_results[i], results_shape[i]))
-      unpacked_results.append(res)
-      current += c  
-    
-    results = unpacked_results   
+    #x = tf.convert_to_tensor([hvd.rank(), 99, 99, 99])
+    #print(x)
+    #x2 = hvd.allreduce(x, average=False)
+    #print(x.eval(), x2.eval())
 
     trans_vecs = utils.SequenceDict()
     for params, result in zip(self.layers.fisher_blocks, results):
-      trans_vecs[params] = result
+      x1 = hvd.allreduce(result[0], average=False)
+      x2 = hvd.allreduce(result[1], average=False)
+      trans_vecs[params] = (x1, x2) #result
 
     return [(trans_vecs[var], var) for _, var in vecs_and_vars]
+
+    #temp = hvd.allreduce((x[0])[0], average=False)
+    #x2 = []
+
+    #for g, v in x:
+    #  grad = hvd.allreduce(g, average=False)
+    #  x2.append((grad, v))
+
+    #return x
 
   def multiply_inverse(self, vecs_and_vars):
     """Multiplies the vecs by the corresponding (damped) inverses of the blocks.
