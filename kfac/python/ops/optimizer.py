@@ -763,7 +763,7 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
                                 for update, var in raw_updates_and_vars]
 
       # All reduce grads_and_vars with horovod before applying them
-      if False: #hvd.size() > 1:
+      if hvd.size() > 1:
         averaged_grads_and_vars = []
         with tf.name_scope(self.hvd_name + "_Allreduce"):
           for grad, var in raw_updates_and_vars:

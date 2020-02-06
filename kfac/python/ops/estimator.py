@@ -280,73 +280,60 @@ class FisherEstimator(object):
     results = []
 
     #for i, partition in enumerate(layer_partitions):
+    #  fb_items = list(self.layers.fisher_blocks.items())[min(partition):max(partition)+1]
+    #  if hvd.rank == i:
+    #    thunks = tuple(make_thunk(fb, params)
+    #                   for params, fb in fb_items)
+
+    #    params_list = tuple(params
+    #                        for params, _ in fb_items)
+
+    #    results.extend(self._place_and_compute_transformation_thunks(thunks, params_list))
+    #  else:
+    #    for param, fb in fb_items:
+    #      results.append(tuple(tf.zeros_like(x) for x in param))
+    
     for i, (params, fb) in enumerate(self.layers.fisher_blocks.items()):
-      #fb_items = list(self.layers.fisher_blocks.items())[min(partition):max(partition)+1]
-      #print(i, partition, len(fb_items), len(self.layers.fisher_blocks.items()))
       rank = [1 if i in x else 0 for x in layer_partitions].index(1)
-      print(fb, params)
       if hvd.rank() == rank:
-        #thunk = tuple(make_thunk(fb, params))
-        #params_list = tuple(params)
-        #result = self._place_and_compute_transformation_thunks(
-        #               thunks, params_list)
         thunk = make_thunk(fb, params)
         result = thunk()
-        print("x", result)
       else:
         result = tuple(tf.zeros_like(x) for x in params)
-        print(result)
-      x1 = hvd.allreduce(result[0], average=False)
-      x2 = hvd.allreduce(result[1], average=False)
-      results.append((x1, x2))
+      results.append(result)
 
-    # Get shapes
+    # Get shapes and flatten results
     shapes = []
-    reduced_results = []
+    flat_results = None
     for i, res in enumerate(results):
       shapes.append(tuple([x.shape.as_list() for x in res]))
-      #for x in res:
-      #    reduced_results.append(hvd.allreduce(x, average=False))
-      #print("rank", hvd.rank(), ":", i, res)
+      for r in res:
+         flat_r = tf.reshape(r, [-1])
+         if flat_results is None:
+           flat_results = flat_r
+         else:
+           flat_results = tf.concat([flat_results, flat_r], axis=0)
 
-    #print(len(reduced_results))
-    #results = [(reduced_results[i], reduced_results[i+1]) for i in range(0, len(reduced_results),2)]
+    print("flattened shape:", flat_results.shape, flat_results)
 
-    #print(len(reduced_results))
+    flat_results = hvd.allreduce(flat_results, average=False)
 
-    #print(layer_count, len(shapes), shapes)
-    #x1 = []
-    #x2 = []
-    #for i, res, in enumerate(results):
-      #results[i] = tuple([hvd.allreduce(x, average=False) for x in res])
-    #  root = [1 if i in x else 0 for x in layer_partitions]
-      #root_rank = root.index(1)
-      #print(root, root_rank, i, [x for x in res])
-    #  x1.append(hvd.allreduce(res[0], average=False))
-    #  x2.append(hvd.allreduce(res[1], average=False))
-      #results[i] = tuple([hvd.broadcast(x, root_rank) for x in res])
-    #results = list(zip(x1, x2))
-    #print(results)
-
-    #x = tf.convert_to_tensor([hvd.rank(), 99, 99, 99])
-    #print(x)
-    #x2 = hvd.allreduce(x, average=False)
-    #print(x.eval(), x2.eval())
+    results = []
+    index = 0
+    for shape_tuple in shapes:
+        res = []
+        for shape in shape_tuple:
+            length = np.prod(shape)
+            x = flat_results[index:index+length]
+            index += length
+            res.append(tf.reshape(x, shape))
+        results.append(tuple(res))
 
     trans_vecs = utils.SequenceDict()
     for params, result in zip(self.layers.fisher_blocks, results):
       trans_vecs[params] = result
 
     return [(trans_vecs[var], var) for _, var in vecs_and_vars]
-
-    #temp = hvd.allreduce((x[0])[0], average=False)
-    #x2 = []
-
-    #for g, v in x:
-    #  grad = hvd.allreduce(g, average=False)
-    #  x2.append((grad, v))
-
-    #return x
 
   def multiply_inverse(self, vecs_and_vars):
     """Multiplies the vecs by the corresponding (damped) inverses of the blocks.
