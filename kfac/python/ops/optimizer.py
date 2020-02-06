@@ -640,7 +640,24 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
         grad.set_shape(var.shape)
 
     grads, vars_ = list(zip(*grads_and_vars))
-    grads = utils.all_average(grads)
+    #grads = utils.all_average(grads)
+    # Replace tf strategy all_average with hvd.all_reduce
+    if hvd.size() > 1:
+      averaged_grads = []
+      with tf.name_scope(self.hvd_name + "_Allreduce"):
+        for grad in grads:
+          if grad is not None:
+            if self.hvd_sparse_as_dense and \
+                isinstance(grad, tf.IndexedSlices):
+              grad = tf.convert_to_tensor(grad)
+            avg_grad = hvd.allreduce(grad,
+                                     device_dense=self.hvd_device_dense,
+                                     device_sparse=self.hvd_device_sparse,
+                                     compression=self.hvd_compression)
+            averaged_grads.append(avg_grad)
+          else:
+            averaged_grads.append(None)
+      grads = averaged_grads
 
     return tuple(zip(grads, vars_))
 
@@ -761,27 +778,6 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
         num_replicas = tf.distribute.get_strategy().num_replicas_in_sync
         raw_updates_and_vars = [(update/num_replicas, var)
                                 for update, var in raw_updates_and_vars]
-
-      # All reduce grads_and_vars with horovod before applying them
-      if hvd.size() > 1:
-        averaged_grads_and_vars = []
-        with tf.name_scope(self.hvd_name + "_Allreduce"):
-          for grad, var in raw_updates_and_vars:
-            if grad is not None:
-              if self.hvd_sparse_as_dense and \
-                  isinstance(grad, tf.IndexedSlices):
-                grad = tf.convert_to_tensor(grad)
-              avg_grad = hvd.allreduce(grad,
-                                       device_dense=self.hvd_device_dense,
-                                       device_sparse=self.hvd_device_sparse,
-                                       compression=self.hvd_compression)
-              averaged_grads_and_vars.append((avg_grad, var))
-            else:
-              averaged_grads_and_vars.append((None, var))
-
-        assert len(grads_and_vars) == len(averaged_grads_and_vars)
-
-        raw_updates_and_vars = averaged_grads_and_vars
 
       # Update trainable variables with this step, applying self._learning_rate.
       apply_op = super(KfacOptimizer, self).apply_gradients(
