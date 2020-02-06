@@ -278,20 +278,6 @@ class FisherEstimator(object):
     layer_partitions = np.array_split(range(layer_count), n)
 
     results = []
-
-    #for i, partition in enumerate(layer_partitions):
-    #  fb_items = list(self.layers.fisher_blocks.items())[min(partition):max(partition)+1]
-    #  if hvd.rank == i:
-    #    thunks = tuple(make_thunk(fb, params)
-    #                   for params, fb in fb_items)
-
-    #    params_list = tuple(params
-    #                        for params, _ in fb_items)
-
-    #    results.extend(self._place_and_compute_transformation_thunks(thunks, params_list))
-    #  else:
-    #    for param, fb in fb_items:
-    #      results.append(tuple(tf.zeros_like(x) for x in param))
     
     for i, (params, fb) in enumerate(self.layers.fisher_blocks.items()):
       rank = [1 if i in x else 0 for x in layer_partitions].index(1)
@@ -314,7 +300,7 @@ class FisherEstimator(object):
          else:
            flat_results = tf.concat([flat_results, flat_r], axis=0)
 
-    print("flattened shape:", flat_results.shape, flat_results)
+    #print("flattened shape:", flat_results.shape, flat_results)
 
     flat_results = hvd.allreduce(flat_results, average=False)
 

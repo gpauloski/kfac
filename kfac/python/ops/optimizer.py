@@ -640,24 +640,7 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
         grad.set_shape(var.shape)
 
     grads, vars_ = list(zip(*grads_and_vars))
-    #grads = utils.all_average(grads)
-    # Replace tf strategy all_average with hvd.all_reduce
-    if hvd.size() > 1:
-      averaged_grads = []
-      with tf.name_scope(self.hvd_name + "_Allreduce"):
-        for grad in grads:
-          if grad is not None:
-            if self.hvd_sparse_as_dense and \
-                isinstance(grad, tf.IndexedSlices):
-              grad = tf.convert_to_tensor(grad)
-            avg_grad = hvd.allreduce(grad,
-                                     device_dense=self.hvd_device_dense,
-                                     device_sparse=self.hvd_device_sparse,
-                                     compression=self.hvd_compression)
-            averaged_grads.append(avg_grad)
-          else:
-            averaged_grads.append(None)
-      grads = averaged_grads
+    grads = utils.all_average(grads)
 
     return tuple(zip(grads, vars_))
 
@@ -757,6 +740,23 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
       # iterated over once. By converting it to a list, we ensure that it can be
       # iterated over more than once.
       grads_and_vars = list(grads_and_vars)
+
+      if hvd.size() > 1:
+        averaged_grads = []
+        with tf.name_scope(self.hvd_name + "_Allreduce"):
+          for grad, var in grads_and_vars:
+            if grad is not None:
+              if self.hvd_sparse_as_dense and \
+                  isinstance(grad, tf.IndexedSlices):
+                grad = tf.convert_to_tensor(grad)
+              avg_grad = hvd.allreduce(grad,
+                                       device_dense=self.hvd_device_dense,
+                                       device_sparse=self.hvd_device_sparse,
+                                       compression=self.hvd_compression)
+              averaged_grads.append((avg_grad, var))
+            else:
+              averaged_grads.append((None, var))
+        grads_and_vars = averaged_grads
 
       with tf.variable_scope(self.get_name()):
         # Compute raw update step (self._learning_rate not yet applied).

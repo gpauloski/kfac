@@ -579,6 +579,8 @@ class FisherFactor(object):
     # (Although be careful about factors [e.g. diagonal] or ops
     # [e.g. multiply()] that directly use the cov vars instead of the inv vars!)
     new_cov = utils.all_average(new_cov)
+    #print(new_cov, type(new_cov))
+    #new_cov is just a tensor
 
     return new_cov
 
