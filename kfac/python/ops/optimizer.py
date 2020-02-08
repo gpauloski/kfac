@@ -412,6 +412,12 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
       self.hvd_device_sparse = hvd_device_sparse
       self.hvd_compression = hvd_compression
       self.hvd_sparse_as_dense = hvd_sparse_as_dense
+      self._allreduce_grads = hvd._make_allreduce_grads_fn(
+          self.hvd_name, 
+          self.hvd_device_dense, 
+          self.hvd_device_sparse, 
+          self.hvd_compression, 
+          self.hvd_sparse_as_dense)
 
       self._fisher_est = est.make_fisher_estimator(
           placement_strategy=placement_strategy,
@@ -639,10 +645,15 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
       if len(grad.shape) and not all(grad.shape.as_list()):
         grad.set_shape(var.shape)
 
-    grads, vars_ = list(zip(*grads_and_vars))
-    grads = utils.all_average(grads)
+    #grads, vars_ = list(zip(*grads_and_vars)) 
+    #grads = utils.all_average(grads)
 
-    return tuple(zip(grads, vars_))
+    if hvd.size() > 1:
+      grads, vars_ = zip(*grads_and_vars)
+      avg_grads = self._allreduce_grads(grads)
+      return list(zip(grads, vars_))
+    else:
+      return grads_and_vars
 
   def _is_damping_adaptation_time(self):
     # Note that we update damping at the step right before the end of the
@@ -740,23 +751,6 @@ class KfacOptimizer(tf.compat.v1.train.GradientDescentOptimizer):
       # iterated over once. By converting it to a list, we ensure that it can be
       # iterated over more than once.
       grads_and_vars = list(grads_and_vars)
-
-      if hvd.size() > 1:
-        averaged_grads = []
-        with tf.name_scope(self.hvd_name + "_Allreduce"):
-          for grad, var in grads_and_vars:
-            if grad is not None:
-              if self.hvd_sparse_as_dense and \
-                  isinstance(grad, tf.IndexedSlices):
-                grad = tf.convert_to_tensor(grad)
-              avg_grad = hvd.allreduce(grad,
-                                       device_dense=self.hvd_device_dense,
-                                       device_sparse=self.hvd_device_sparse,
-                                       compression=self.hvd_compression)
-              averaged_grads.append((avg_grad, var))
-            else:
-              averaged_grads.append((None, var))
-        grads_and_vars = averaged_grads
 
       with tf.variable_scope(self.get_name()):
         # Compute raw update step (self._learning_rate not yet applied).
