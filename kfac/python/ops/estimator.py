@@ -59,8 +59,6 @@ def make_fisher_estimator(placement_strategy=None, **kwargs):
     return FisherEstimatorRoundRobin(**kwargs)
   elif placement_strategy == "replica_round_robin":
     return FisherEstimatorReplicaRoundRobin(**kwargs)
-  elif placement_strategy == "hvd_round_robin":
-    return FisherEstimatorHorovodRoundRobin(**kwargs)
   else:
     raise ValueError(
         "Unimplemented vars and ops placement strategy : {}".format(
@@ -288,7 +286,7 @@ class FisherEstimator(object):
       else:
         result = tuple(tf.zeros_like(x) for x in params)
 
-      shapes.append(tuple([x.shape.as_list() for x in result]))
+      shapes.append(tuple(x.shape.as_list() for x in result))
 
       for r in result:
          flat_r = tf.reshape(r, [-1])
@@ -297,7 +295,9 @@ class FisherEstimator(object):
          else:
            flat_results = tf.concat([flat_results, flat_r], axis=0)
 
-    flat_results = hvd.allreduce(flat_results, average=False)
+    # TODO(gpauloski) FIX average=False
+    flat_results = hvd.allreduce(flat_results, op=hvd.Sum)
+    #flat_results = hvd.allreduce(flat_results) * hvd.size()
 
     results = []
     index = 0
@@ -771,8 +771,3 @@ class FisherEstimatorReplicaRoundRobin(
   """FisherEstimator which provides round robin replica placement strategy."""
   pass
 
-class FisherEstimatorHorovodRoundRobin(
-    placement.HorovodRoundRobinPlacementMixin,
-    FisherEstimator):
-  """FisherEstimator with Horovod round robin placement strategy."""
-  pass
