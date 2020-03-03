@@ -29,6 +29,8 @@ from tensorflow.contrib.tpu.python.tpu import tpu_function
 from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.util import nest
 
+import horovod.tensorflow as hvd
+
 # Method used for inverting matrices.
 POSDEF_INV_METHOD = "cholesky"
 POSDEF_EIG_METHOD = "self_adjoint"
@@ -540,7 +542,7 @@ def all_sum(structure, name=None):
   return structure
 
 
-def all_average(structure, name=None):
+def all_average(structure, name=None, hvd_op=hvd.Average):
   """Averages the contents of a nested structure across all replicas.
 
   If not operating in a supported replicated context this function acts like
@@ -554,6 +556,17 @@ def all_average(structure, name=None):
     A nested structure with the corresponding Tensors being the cross-replica
     averaged versions of those in `structure`.
   """
+  
+  if hvd.size() > 1:
+      return structure
+
+  if tf.is_tensor(structure):
+      return hvd.allreduce(structure, op=hvd_op)
+
+  return [hvd.allreduce(x, op=hvd_op)
+          if x is not None else x
+          for x in structure]
+
   num_replicas = get_num_replicas()
 
   if num_replicas <= 1:

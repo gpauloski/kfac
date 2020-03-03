@@ -265,13 +265,48 @@ class FisherEstimator(object):
     def make_thunk(fb, params):
       return lambda: transform(fb, vecs[params])
 
-    thunks = tuple(make_thunk(fb, params)
-                   for params, fb in self.layers.fisher_blocks.items())
+    n = hvd.size()
+    layer_count = len(self.layers.fisher_blocks.items())
 
-    params_list = tuple(params
-                        for params, _ in self.layers.fisher_blocks.items())
+    # handle case where fewer layers than workers so some workers
+    # just won't get work
+    if layer_count < n:
+      n = layers_count
 
-    results = self._place_and_compute_transformation_thunks(thunks, params_list)
+    layer_partitions = np.array_split(range(layer_count), n)
+
+    shapes = []
+    flat_results = None
+    
+    for i, (params, fb) in enumerate(self.layers.fisher_blocks.items()):
+      rank = [1 if i in x else 0 for x in layer_partitions].index(1) 
+      #if hvd.rank() == rank:
+      thunk = make_thunk(fb, params)
+      result = thunk()
+      #else:
+      #  result = tuple(tf.zeros_like(x) for x in params)
+
+      shapes.append(tuple(x.shape.as_list() for x in result))
+
+      for r in result:
+         flat_r = tf.reshape(r, [-1])
+         if flat_results is None:
+           flat_results = flat_r
+         else:
+           flat_results = tf.concat([flat_results, flat_r], axis=0)
+
+    flat_results = hvd.allreduce(flat_results, op=hvd.Average)
+
+    results = []
+    index = 0
+    for shape_tuple in shapes:
+        res = []
+        for shape in shape_tuple:
+            length = np.prod(shape)
+            x = flat_results[index:index+length]
+            index += length
+            res.append(tf.reshape(x, shape))
+        results.append(tuple(res))
 
     trans_vecs = utils.SequenceDict()
     for params, result in zip(self.layers.fisher_blocks, results):
@@ -494,9 +529,6 @@ class FisherEstimator(object):
 
     scope = self.name if scope is None else scope
 
-    for i, factor in enumerate(self.factors):
-        factor.hvd_id = i % hvd.size()
-
     cov_variable_thunks = [
         self._create_cov_variable_thunk(factor, scope)
         for factor in self.factors
@@ -508,16 +540,9 @@ class FisherEstimator(object):
         self._create_inv_variable_thunk(factor, scope)
         for factor in self.factors
     ]
-    
-    inv_update_thunks = []
-    for factor in self.factors:
-        thunk = self._create_inv_update_thunk(factor, scope)
-        thunk.is_inv = True
-        thunk.hvd_id = factor.hvd_id
-        inv_update_thunks.append(thunk)
-    #inv_update_thunks = [
-    #    self._create_inv_update_thunk(factor, scope) for factor in self.factors
-    #]
+    inv_update_thunks = [
+        self._create_inv_update_thunk(factor, scope) for factor in self.factors
+    ]
 
     return (cov_variable_thunks, cov_update_thunks,
             inv_variable_thunks, inv_update_thunks)
@@ -650,12 +675,6 @@ class FisherEstimator(object):
 
     def thunk():
       with tf.variable_scope(scope):
-        #if hvd.rank() == factor.hvd_id:
-        #    ops = factor.make_inverse_update_ops()
-        #    ops = [hvd.allreduce(x, op=hvd.Average) for x in temp]
-        #else:
-        #    
-        #return tf.group(temp)
         return tf.group(factor.make_inverse_update_ops())
 
     return thunk
@@ -749,3 +768,4 @@ class FisherEstimatorReplicaRoundRobin(
     FisherEstimator):
   """FisherEstimator which provides round robin replica placement strategy."""
   pass
+

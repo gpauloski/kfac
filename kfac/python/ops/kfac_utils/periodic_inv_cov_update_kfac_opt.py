@@ -184,9 +184,21 @@ class PeriodicInvCovUpdateKfacOpt(optimizer.KfacOptimizer):
 
     should_do_cov_updates = tf.equal(tf.mod(self.counter,
                                             self._cov_update_every), 0)
+
+    # TODD(gpauloski) remove this code and commented stuff below
+    def exec_thunks(update_thunks, round_robin=False):
+        temp = []
+        for thunk in update_thunks:
+            #print(thunk)
+            temp.append(thunk())
+            print(temp[-1], type(temp[-1]))
+        return tuple(temp)
+        return (thunk() for thunk in update_thunks)
+
     maybe_cov_updates = tf.cond(
         should_do_cov_updates,
         lambda: tf.group(*(thunk() for thunk in cov_update_thunks)),
+        #lambda: tf.group(*exec_thunks(cov_update_thunks)),
         tf.no_op)
 
     maybe_pre_update_adapt_damping = self.maybe_pre_update_adapt_damping()
@@ -197,6 +209,7 @@ class PeriodicInvCovUpdateKfacOpt(optimizer.KfacOptimizer):
       maybe_inv_updates = tf.cond(
           should_do_inv_updates,
           lambda: tf.group(*(thunk() for thunk in inv_update_thunks)),
+          #lambda: tf.group(*exec_thunks(inv_update_thunks)),
           tf.no_op)
       return maybe_inv_updates
 

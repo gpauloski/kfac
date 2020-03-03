@@ -32,7 +32,6 @@ from tensorflow.python.util import nest
 from kfac.python.ops import linear_operator as lo
 from kfac.python.ops import utils
 
-
 # Whether to initialize covariance estimators at a zero matrix (or the identity
 # matrix).
 INIT_COVARIANCES_AT_ZERO = True
@@ -430,6 +429,7 @@ class FisherFactor(object):
     self._cov_tensor = None
     self._cov = None
     self._acc_cov = None
+    self.hvd_id = None
 
   @abc.abstractproperty
   def _var_scope(self):
@@ -579,6 +579,7 @@ class FisherFactor(object):
     # (Although be careful about factors [e.g. diagonal] or ops
     # [e.g. multiply()] that directly use the cov vars instead of the inv vars!)
     new_cov = utils.all_average(new_cov)
+    
     #print(new_cov, type(new_cov))
     #new_cov is just a tensor
 
@@ -879,6 +880,9 @@ class DenseSquareMatrixFactor(FisherFactor):
         ops.append(utils.smart_assign(cholesky, cholesky_value))
 
     self._eigendecomp = False
+
+    print("in update ops", ops)
+
     return ops
 
   def get_inverse(self, damping_func):
